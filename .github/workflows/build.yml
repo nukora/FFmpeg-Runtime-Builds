@@ -210,7 +210,7 @@ jobs:
           Write-Host $buildConfiguration
 
   release:
-    name: Publish GitHub Release
+    name: Sign and publish release
     needs:
       - build
       - test-windows
@@ -221,13 +221,49 @@ jobs:
 
     permissions:
       contents: write
+      pages: write
+      id-token: write
 
     steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
           name: release-assets
           path: release-assets
+
+      - name: Sign manifest
+        shell: bash
+        env:
+          MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.MANIFEST_SIGNING_PRIVATE_KEY }}
+        run: |
+          ./scripts/sign-manifest.sh \
+            "release-assets/manifest.json" \
+            "release-assets/manifest.sig"
+
+      - name: Verify manifest signature
+        shell: bash
+        run: |
+          ./scripts/verify-manifest-signature.sh \
+            "release-assets/manifest.json" \
+            "release-assets/manifest.sig" \
+            "keys/runtime-signing-public.pem"
+
+      - name: Update SHA-256 list
+        shell: bash
+        run: |
+          cd release-assets
+
+          sha256sum \
+            "ffmpeg-runtime-win-x64-${{ inputs.runtime_version }}.zip" \
+            "ffmpeg-source-${{ inputs.runtime_version }}.tar.gz" \
+            manifest.json \
+            manifest.sig \
+            > SHA256SUMS
 
       - name: Publish release
         env:
@@ -241,3 +277,70 @@ jobs:
             --target "${{ github.sha }}" \
             --title "FFmpeg Runtime ${{ inputs.runtime_version }}" \
             --notes "Windows x64 LGPL shared build of FFmpeg ${{ inputs.ffmpeg_ref }}."
+
+      - name: Prepare Pages files
+        shell: bash
+        run: |
+          PAGE_ROOT="${RUNNER_TEMP}/pages"
+          VERSION_DIR="${PAGE_ROOT}/releases/${{ inputs.runtime_version }}"
+
+          mkdir -p "${VERSION_DIR}"
+
+          cp release-assets/manifest.json \
+            "${VERSION_DIR}/manifest.json"
+
+          cp release-assets/manifest.sig \
+            "${VERSION_DIR}/manifest.sig"
+
+          cp keys/runtime-signing-public.pem \
+            "${PAGE_ROOT}/runtime-signing-public.pem"
+
+          cat > "${PAGE_ROOT}/index.html" <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>FFmpeg Runtime Builds</title>
+          </head>
+          <body>
+            <h1>FFmpeg Runtime Builds</h1>
+            <p>
+              Reproducible Windows x64 LGPL shared builds of FFmpeg.
+            </p>
+            <p>
+              Runtime binaries are distributed through GitHub Releases.
+            </p>
+          </body>
+          </html>
+          EOF
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy-pages:
+    name: Deploy GitHub Pages
+    needs:
+      - release
+
+    if: ${{ inputs.publish_release }}
+
+    runs-on: ubuntu-24.04
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
