@@ -10,7 +10,9 @@ INSTALL_DIR="/tmp/ffmpeg-install"
 
 rm -rf "${BUILD_DIR}"
 rm -rf "${INSTALL_DIR}"
-rm -rf "${OUTPUT_DIR}"
+
+mkdir -p "${OUTPUT_DIR}"
+find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 
 mkdir -p "${BUILD_DIR}"
 mkdir -p "${INSTALL_DIR}"
