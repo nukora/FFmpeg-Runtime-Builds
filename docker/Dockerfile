@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
-        make \
+        build-essential \
         mingw-w64 \
         nasm \
         pkg-config \
