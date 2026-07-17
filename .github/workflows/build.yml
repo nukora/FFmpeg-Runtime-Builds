@@ -111,7 +111,8 @@ jobs:
             "${{ inputs.ffmpeg_ref }}" \
             "${{ steps.commits.outputs.source }}" \
             "${{ github.repository }}" \
-            "${{ steps.commits.outputs.build }}"
+            "${{ steps.commits.outputs.build }}" \
+            "runtime-${{ inputs.runtime_version }}"
 
       - name: Create source archive
         shell: bash
