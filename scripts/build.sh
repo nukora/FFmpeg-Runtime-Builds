@@ -69,7 +69,10 @@ cp "${BUILD_DIR}/COPYING.LGPLv2.1" \
 cp "${BUILD_DIR}/config.h" \
     "${OUTPUT_DIR}/metadata/config.h"
 
-cp "${BUILD_DIR}/config.mak" \
+cp "${BUILD_DIR}/ffbuild/config.mak" \
     "${OUTPUT_DIR}/metadata/config.mak"
+
+cp "${BUILD_DIR}/ffbuild/config.log" \
+    "${OUTPUT_DIR}/metadata/config.log"
 
 echo "FFmpeg build completed."
