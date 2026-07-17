@@ -1,0 +1,242 @@
+name: Build FFmpeg Windows Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_ref:
+        description: FFmpeg tag or commit
+        required: true
+        default: n8.1
+        type: string
+
+      runtime_version:
+        description: Runtime version, for example 8.1-r1
+        required: true
+        default: 8.1-r1
+        type: string
+
+      publish_release:
+        description: Publish a GitHub Release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffmpeg-runtime-${{ inputs.runtime_version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build on Linux
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+        with:
+          path: build-repository
+          persist-credentials: false
+
+      - name: Checkout FFmpeg source
+        uses: actions/checkout@v4
+        with:
+          repository: nukora/FFmpeg
+          ref: ${{ inputs.ffmpeg_ref }}
+          path: ffmpeg-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve commit hashes
+        id: commits
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_COMMIT="$(git -C ffmpeg-source rev-parse HEAD)"
+          BUILD_COMMIT="$(git -C build-repository rev-parse HEAD)"
+
+          echo "source=${SOURCE_COMMIT}" >> "${GITHUB_OUTPUT}"
+          echo "build=${BUILD_COMMIT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build Docker image
+        shell: bash
+        run: |
+          docker build \
+            --file build-repository/docker/Dockerfile \
+            --tag ffmpeg-runtime-builder \
+            build-repository
+
+      - name: Build FFmpeg
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/runtime"
+
+          docker run \
+            --rm \
+            --volume "${GITHUB_WORKSPACE}/ffmpeg-source:/source:ro" \
+            --volume "${RUNNER_TEMP}/runtime:/output" \
+            ffmpeg-runtime-builder \
+            /scripts/build.sh \
+            /source \
+            /output
+
+      - name: Verify runtime structure
+        shell: bash
+        run: |
+          docker run \
+            --rm \
+            --volume "${RUNNER_TEMP}/runtime:/output:ro" \
+            ffmpeg-runtime-builder \
+            /scripts/verify.sh \
+            /output
+
+      - name: Package runtime
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/dist"
+
+          docker run \
+            --rm \
+            --volume "${RUNNER_TEMP}/runtime:/output:ro" \
+            --volume "${RUNNER_TEMP}/dist:/dist" \
+            ffmpeg-runtime-builder \
+            /scripts/package.sh \
+            /output \
+            /dist \
+            "${{ inputs.runtime_version }}" \
+            "nukora/FFmpeg" \
+            "${{ inputs.ffmpeg_ref }}" \
+            "${{ steps.commits.outputs.source }}" \
+            "${{ github.repository }}" \
+            "${{ steps.commits.outputs.build }}"
+
+      - name: Create source archive
+        shell: bash
+        run: |
+          git -C ffmpeg-source archive \
+            --format=tar.gz \
+            --output="${RUNNER_TEMP}/dist/ffmpeg-source-${{ inputs.runtime_version }}.tar.gz" \
+            "${{ steps.commits.outputs.source }}"
+
+      - name: Create SHA-256 list
+        shell: bash
+        run: |
+          cd "${RUNNER_TEMP}/dist"
+
+          sha256sum \
+            "ffmpeg-runtime-win-x64-${{ inputs.runtime_version }}.zip" \
+            "ffmpeg-source-${{ inputs.runtime_version }}.tar.gz" \
+            manifest.json \
+            > SHA256SUMS
+
+      - name: Upload runtime for Windows test
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-under-test
+          path: ${{ runner.temp }}/runtime
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          retention-days: 30
+
+  test-windows:
+    name: Test on Windows
+    needs: build
+    runs-on: windows-2025
+
+    steps:
+      - name: Download runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-under-test
+          path: runtime
+
+      - name: Test FFmpeg executables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $ffmpeg = Join-Path $PWD "runtime/bin/ffmpeg.exe"
+          $ffprobe = Join-Path $PWD "runtime/bin/ffprobe.exe"
+
+          if (-not (Test-Path $ffmpeg)) {
+              throw "ffmpeg.exe was not found."
+          }
+
+          if (-not (Test-Path $ffprobe)) {
+              throw "ffprobe.exe was not found."
+          }
+
+          & $ffmpeg -version
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "ffmpeg.exe -version failed."
+          }
+
+          & $ffprobe -version
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "ffprobe.exe -version failed."
+          }
+
+          $buildConfiguration = (& $ffmpeg -buildconf 2>&1 | Out-String)
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "ffmpeg.exe -buildconf failed."
+          }
+
+          if ($buildConfiguration -match "--enable-gpl") {
+              throw "GPL configuration was detected."
+          }
+
+          if ($buildConfiguration -match "--enable-nonfree") {
+              throw "Nonfree configuration was detected."
+          }
+
+          if ($buildConfiguration -notmatch "--enable-shared") {
+              throw "Shared library configuration was not detected."
+          }
+
+          Write-Host $buildConfiguration
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - build
+      - test-windows
+
+    if: ${{ inputs.publish_release }}
+
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create \
+            "runtime-${{ inputs.runtime_version }}" \
+            release-assets/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "FFmpeg Runtime ${{ inputs.runtime_version }}" \
+            --notes "Windows x64 LGPL shared build of FFmpeg ${{ inputs.ffmpeg_ref }}."
